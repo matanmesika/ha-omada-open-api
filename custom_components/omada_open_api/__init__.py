@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import ssl
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
-from homeassistant.const import Platform
+from homeassistant.const import CONF_VERIFY_SSL, Platform
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryNotReady,
@@ -21,7 +22,7 @@ from homeassistant.helpers import (
 )
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import OmadaApiAuthError, OmadaApiClient
+from .api import OmadaApiAuthError, OmadaApiClient, OmadaApiError
 from .auth import WebSessionAuth
 from .clients import normalize_client_mac
 from .const import (
@@ -179,6 +180,30 @@ _SCAN_INTERVAL_KEYS = {
     CONF_CLIENT_SCAN_INTERVAL,
     CONF_APP_SCAN_INTERVAL,
 }
+
+
+def _is_certificate_error(err: BaseException) -> bool:
+    """Return True if an exception's cause chain contains a TLS certificate error.
+
+    Args:
+        err: Exception whose ``__cause__``/``__context__`` chain is inspected.
+
+    Returns:
+        True when the chain contains an ``ssl.SSLCertVerificationError`` or an
+        ``aiohttp.ClientConnectorCertificateError``.
+
+    """
+    seen: set[int] = set()
+    current: BaseException | None = err
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(
+            current,
+            (ssl.SSLCertVerificationError, aiohttp.ClientConnectorCertificateError),
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _migrate_data_to_options(hass: HomeAssistant, entry: OmadaConfigEntry) -> None:
@@ -345,7 +370,7 @@ async def _async_setup_wan_speed_test(
     return wan_speed_test_coordinators
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: OmadaConfigEntry) -> bool:  # pylint: disable=too-many-statements,too-many-branches
+async def async_setup_entry(hass: HomeAssistant, entry: OmadaConfigEntry) -> bool:  # noqa: C901  # pylint: disable=too-many-statements,too-many-branches
     """Set up Omada Open API from a config entry.
 
     Args:
@@ -409,7 +434,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: OmadaConfigEntry) -> boo
             )
         else:
             # Traditional OpenAPI: client_credentials authentication
-            session = async_get_clientsession(hass)
+            session = async_get_clientsession(
+                hass, verify_ssl=entry.data.get(CONF_VERIFY_SSL, False)
+            )
             token_expires_at = dt.datetime.fromisoformat(
                 entry.data[CONF_TOKEN_EXPIRES_AT]
             )
@@ -449,6 +476,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: OmadaConfigEntry) -> boo
         raise ConfigEntryAuthFailed(
             "Authentication failed. Please re-authenticate."
         ) from err
+    except OmadaApiError as err:
+        if _is_certificate_error(err):
+            _LOGGER.warning(
+                "TLS certificate verification failed for %s. Disable 'Verify "
+                "TLS certificate' in the integration's reconfigure settings "
+                "if this controller uses a self-signed certificate.",
+                entry.data[CONF_API_URL],
+            )
+            raise ConfigEntryNotReady("TLS certificate verification failed.") from err
+        raise
     except (TimeoutError, OSError) as err:
         raise ConfigEntryNotReady(
             "Unable to connect to Omada API. Will retry."

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+import ssl
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
+from aiohttp.client_reqrep import ConnectionKey
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.const import CONF_VERIFY_SSL
+from homeassistant.exceptions import ConfigEntryNotReady, ServiceValidationError
 from homeassistant.helpers import (
     device_registry as dr,
     entity_registry as er,
@@ -18,11 +23,13 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.omada_open_api import (
     _cleanup_devices,
     _cleanup_entities,
+    _is_certificate_error,
     _migrate_data_to_options,
     _migrate_merged_devices,
     _migrate_wan_speed_test_button_unique_ids,
     _prune_stale_infra_devices,
     async_remove_config_entry_device,
+    async_setup_entry,
 )
 from custom_components.omada_open_api.api import OmadaApiAuthError, OmadaApiError
 from custom_components.omada_open_api.const import (
@@ -105,6 +112,20 @@ def _build_entry(
     return entry
 
 
+def _certificate_error() -> OmadaApiError:
+    """Wrap an aiohttp certificate failure the way api.py does."""
+    key = ConnectionKey("omada.local", 8043, True, True, None, None, None)
+    cert_error = aiohttp.ClientConnectorCertificateError(
+        key,
+        ssl.SSLCertVerificationError(
+            1, "certificate verify failed: self-signed certificate"
+        ),
+    )
+    api_error = OmadaApiError(f"Connection error: {cert_error}")
+    api_error.__cause__ = cert_error
+    return api_error
+
+
 def _patch_api_client(**overrides):
     """Return a context manager that patches OmadaApiClient construction."""
     mock_instance = MagicMock()
@@ -174,13 +195,54 @@ async def test_setup_entry_success(hass: HomeAssistant) -> None:
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-    mock_get_clientsession.assert_called_once_with(hass)
+    mock_get_clientsession.assert_called_once_with(hass, verify_ssl=False)
     assert entry.state is ConfigEntryState.LOADED
     runtime = entry.runtime_data
     assert runtime.api_client is not None
     assert TEST_SITE_ID in runtime.coordinators
     assert (TEST_SITE_ID, "AA-BB-CC-DD-EE-03") in runtime.wan_speed_test_coordinators
     assert runtime.has_write_access is True
+
+
+async def test_setup_entry_success_with_verify_ssl(hass: HomeAssistant) -> None:
+    """A stored verify_ssl=True is passed through to the shared session."""
+    entry = _build_entry(hass, data_overrides={CONF_VERIFY_SSL: True})
+    patcher, _mock_client = _patch_api_client()
+    shared_session = MagicMock()
+
+    with (
+        patcher,
+        patch(
+            "custom_components.omada_open_api.async_get_clientsession",
+            return_value=shared_session,
+        ) as mock_get_clientsession,
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    mock_get_clientsession.assert_called_once_with(hass, verify_ssl=True)
+    assert entry.state is ConfigEntryState.LOADED
+
+
+def test_is_certificate_error_walks_cause_and_context() -> None:
+    """The helper flags direct, caused, contextual, and cyclic chains."""
+    direct = ssl.SSLCertVerificationError(1, "certificate verify failed")
+    assert _is_certificate_error(direct) is True
+
+    caused = OmadaApiError("Connection error")
+    caused.__cause__ = direct
+    assert _is_certificate_error(caused) is True
+
+    contextual = OmadaApiError("Connection error")
+    contextual.__context__ = _certificate_error()
+    assert _is_certificate_error(contextual) is True
+
+    unrelated = OmadaApiError("HTTP 500: server error")
+    assert _is_certificate_error(unrelated) is False
+
+    cyclic = OmadaApiError("cycle")
+    cyclic.__context__ = cyclic
+    assert _is_certificate_error(cyclic) is False
 
 
 async def test_setup_skips_disabled_vpn_and_wan_speed_test(
@@ -907,6 +969,39 @@ async def test_setup_entry_os_error(hass: HomeAssistant) -> None:
         await hass.async_block_till_done()
 
     assert entry.state is ConfigEntryState.SETUP_RETRY
+
+
+async def test_setup_entry_certificate_error_is_retryable(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A wrapped TLS certificate failure raises a retryable ConfigEntryNotReady."""
+    entry = _build_entry(hass)
+    patcher, _mock_client = _patch_api_client(
+        get_sites=AsyncMock(side_effect=_certificate_error()),
+    )
+
+    with (
+        caplog.at_level(logging.WARNING),
+        patcher,
+        pytest.raises(ConfigEntryNotReady),
+    ):
+        await async_setup_entry(hass, entry)
+
+    assert "TLS certificate verification failed" in caplog.text
+
+
+async def test_setup_entry_generic_api_error_propagates(
+    hass: HomeAssistant,
+) -> None:
+    """A non-certificate OmadaApiError is not converted to a retry."""
+    entry = _build_entry(hass)
+    patcher, _mock_client = _patch_api_client(
+        get_sites=AsyncMock(side_effect=OmadaApiError("HTTP 500: server error")),
+    )
+
+    with patcher, pytest.raises(OmadaApiError):
+        await async_setup_entry(hass, entry)
 
 
 # ---------------------------------------------------------------------------
