@@ -144,6 +144,7 @@ The following parameters are required during the initial setup flow:
 | **Controller Type** | 1 – Controller type | Yes | `Cloud` (TP-Link cloud-hosted), `Local` (self-hosted controller), or `Fusion Gateway` (built-in controller). Determines the authentication method and API endpoint used. |
 | **Region** | 2 – Region *(cloud only)* | Yes (cloud) | Cloud region where your controller is deployed: **United States**, **Europe**, or **Asia Pacific (Singapore)**. Sets the API base URL automatically. |
 | **Controller URL** | 2 – Local URL *(local/fusion)* | Yes (local/fusion) | Full URL of your controller, including protocol and port (e.g., `https://192.168.1.100:8043` for local, `https://192.168.1.1` for Fusion). |
+| **Verify TLS certificate** | 2 – Local URL *(local only)* | Yes | Controls HTTPS certificate validation for local controllers. Defaults to enabled for new setups. Disable it to connect to a hardware controller (e.g. OC200/OC300) that serves its factory self-signed certificate. |
 | **Username** | 2 – Fusion credentials *(fusion only)* | Yes (fusion) | Web interface login username for the Fusion Gateway. |
 | **Password** | 2 – Fusion credentials *(fusion only)* | Yes (fusion) | Web interface login password for the Fusion Gateway. |
 | **Omada ID** | 3 – Credentials *(local/cloud)* | Yes (local/cloud) | The MSP ID or Customer ID from your Open API application. Found in **Settings → Platform Integration → Open API** in the Omada controller. |
@@ -157,6 +158,23 @@ The following parameters are required during the initial setup flow:
 - Cloud: outbound HTTPS (443) to TP-Link cloud
 - Local: network access to your controller's API port (typically 8043)
 - Fusion: HTTPS access to the gateway's IP (port 443)
+
+### TLS Certificate Verification
+
+The **Verify TLS certificate** toggle appears on the local controller setup step
+and in the reconfigure flow. It controls whether HTTPS connections to a local
+controller validate the server's certificate.
+
+- New setups default to **enabled** (verification on).
+- Entries created before this setting existed keep verification **disabled**
+  until you change it, so controllers with the factory self-signed certificate
+  keep working after upgrading.
+- Disable it for LAN-only hardware controllers (OC200/OC300) that serve the
+  factory self-signed certificate.
+- To keep verification enabled, install a certificate that Home Assistant
+  trusts instead — see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#tls-certificate-verification-failed--self-signed-certificates).
+
+Change the setting later via **Settings → Devices & Services → TP-Link Omada Open API → ⋮ → Reconfigure**.
 
 ---
 
@@ -346,6 +364,10 @@ automation:
 ## Options
 
 After initial setup, go to **Settings → Devices & Services → TP-Link Omada Open API → Configure** to access a menu with the following configuration options:
+
+> **Verify TLS certificate** is stored alongside the other entry data rather
+> than in this menu. Change it through **Reconfigure** — see
+> [TLS Certificate Verification](#tls-certificate-verification).
 
 ### Client Selection
 

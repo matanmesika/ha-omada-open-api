@@ -15,6 +15,36 @@
 
 > **"Controller ID not exist" (error -7131)?** Re-copying the Omada ID won't help — the free Omada Cloud/Central Essentials tier has no Open API at all (see [README → Features](README.md#features)). Upgrade to Standard, or switch to **Local** with a self-hosted controller.
 
+## TLS Certificate Verification Failed / Self-Signed Certificates
+
+v1.10.0 began enforcing TLS certificate verification for local OpenAPI
+controllers. Controllers that serve the factory self-signed certificate — most
+commonly LAN-only OC200/OC300 hardware controllers — then failed with
+`certificate verify failed`, and the config entry could not be set up. This
+release softens that behavior so affected entries reconnect without user action:
+
+- Entries created before the setting existed keep verification **disabled**,
+  restoring connectivity to self-signed controllers on upgrade.
+- New setups default to verification **enabled** and show a **Verify TLS
+  certificate** toggle on the local controller setup step.
+- When setup hits a certificate failure it now logs a warning naming the toggle
+  and retries instead of failing permanently.
+
+To change the setting, use **Settings → Devices & Services → TP-Link Omada Open
+API → ⋮ → Reconfigure** and toggle **Verify TLS certificate**. The reconfigure
+form re-validates the connection, so re-enter your credentials when prompted.
+
+Disable verification if your controller serves its factory self-signed
+certificate. Verification protects against machine-in-the-middle attacks on the
+LAN, so prefer one of these free alternatives when possible:
+
+1. **Let's Encrypt via a DNS-01 challenge** for a DNS name that resolves on the
+   LAN. DNS-01 proves control of the domain without exposing the controller to
+   the internet, and the issued certificate is trusted by Home Assistant.
+2. **An internal certificate authority** whose root certificate is imported into
+   Home Assistant's trusted CA store. Issue a certificate for the controller's
+   DNS name or IP from that CA and keep verification enabled.
+
 ## No Entities Created
 
 1. Verify you selected at least one site during setup
