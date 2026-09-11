@@ -23,6 +23,8 @@ from .coordinator import (
 from .entity import OmadaEntity
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -46,23 +48,23 @@ async def async_setup_entry(
     static_entities: list[ButtonEntity] = [
         OmadaWlanOptimizationButton(coordinator) for coordinator in site_coordinators
     ]
-    for (_, gateway_mac), speed_coordinator in rd.wan_speed_test_coordinators.items():
-        for index, port in enumerate(speed_coordinator.data.get("ports", []), start=1):
-            port_uuid = port.get("portUuid")
-            if not port_uuid:
-                continue
-            port_id = str(port.get("port") or port.get("portId") or index)
-            static_entities.append(
-                OmadaWanSpeedTestButton(
-                    coordinator=speed_coordinator,
-                    gateway_mac=gateway_mac,
-                    port_id=port_id,
-                    port_uuid=port_uuid,
-                    port_name=port.get("portName") or port.get("name") or port_id,
-                )
-            )
     if static_entities:
         async_add_entities(static_entities)
+
+    # --- Dynamic gateway WAN speed-test buttons ---
+    for (_, gateway_mac), speed_coordinator in rd.wan_speed_test_coordinators.items():
+        known_wan_port_uuids: set[str] = set()
+        _async_add_new_wan_buttons = _make_wan_speed_test_button_listener(
+            speed_coordinator,
+            gateway_mac,
+            known_wan_port_uuids,
+            async_add_entities,
+        )
+
+        _async_add_new_wan_buttons()
+        entry.async_on_unload(
+            speed_coordinator.async_add_listener(_async_add_new_wan_buttons)
+        )
 
     # --- Dynamic infrastructure device buttons ---
     known_device_macs: set[str] = set()
@@ -118,6 +120,40 @@ async def async_setup_entry(
 
         _async_check_new_clients()
         entry.async_on_unload(client_coord.async_add_listener(_async_check_new_clients))
+
+
+def _make_wan_speed_test_button_listener(
+    coordinator: OmadaWanSpeedTestCoordinator,
+    gateway_mac: str,
+    known_port_uuids: set[str],
+    async_add_entities: AddEntitiesCallback,
+) -> Callable[[], None]:
+    """Create a listener that adds buttons for newly discovered WAN ports."""
+
+    @callback
+    def _async_add_new_wan_buttons() -> None:
+        """Add speed-test buttons for gateway WAN ports seen since setup."""
+        ports = (coordinator.data or {}).get("ports", [])
+        new_entities: list[ButtonEntity] = []
+        for index, port in enumerate(ports, start=1):
+            port_uuid = port.get("portUuid")
+            if not port_uuid or port_uuid in known_port_uuids:
+                continue
+            known_port_uuids.add(port_uuid)
+            port_id = str(port.get("port") or port.get("portId") or index)
+            new_entities.append(
+                OmadaWanSpeedTestButton(
+                    coordinator=coordinator,
+                    gateway_mac=gateway_mac,
+                    port_id=port_id,
+                    port_uuid=port_uuid,
+                    port_name=port.get("portName") or port.get("name") or port_id,
+                )
+            )
+        if new_entities:
+            async_add_entities(new_entities)
+
+    return _async_add_new_wan_buttons
 
 
 class OmadaDeviceRebootButton(
