@@ -1,15 +1,43 @@
-## What's New in v1.10.0
+## What's Changed in v1.10.1
 
-### Features
-- Monitor site-to-site, VPN server, and VPN client tunnels from Home Assistant. Each tunnel has a clear connectivity entity, while peer and traffic details are available as diagnostic entities.
-- Run a Fusion gateway WAN speed test from Home Assistant and monitor its running state, download, upload, latency, and most recent result.
-- Choose whether VPN monitoring and WAN speed-test entities are enabled from the integration's Gateway Entity Settings options.
+This is a bug-fix release for two regressions introduced in v1.10.0, plus a
+security hardening fix.
 
-### Improvements
-- VPN client telemetry now reflects the client connection and traffic reported by Omada, instead of presenting peer-count diagnostics that do not apply to VPN clients.
-- The minimum configurable polling interval is now 30 seconds to protect third-party controller APIs from excessive traffic. Existing lower values are raised automatically during setup.
+### Fixed
+
+- **Local controllers with self-signed certificates can connect again** (#52,
+  #53, #54). v1.10.0 enforced TLS certificate verification on the OpenAPI
+  session with no way to opt out, so self-hosted controllers and OC200/OC300
+  gateways using the factory self-signed certificate failed to set up. OpenAPI
+  sessions now honor a per-entry "Verify TLS certificate" setting:
+  - Existing local entries created before this option default to unverified, so
+    they reconnect after upgrading without any user action.
+  - New local setups default to verification ON. If your controller uses the
+    factory self-signed certificate, clear "Verify TLS certificate" during
+    setup, or use Reconfigure to turn it off afterwards. See
+    TROUBLESHOOTING.md.
+  - Cloud controllers always verify TLS, regardless of the stored value, and
+    the toggle is hidden for cloud reconfiguration.
+  - Certificate failures now surface an actionable setup error instead of a
+    generic connection error.
+- **Button platform no longer fails at startup** (#58). When a gateway's WAN
+  speed-test coordinator had no data yet at Home Assistant startup, setting up
+  the button platform raised `AttributeError: 'NoneType' object has no attribute
+  'get'` and no buttons were created. Setup now tolerates missing data and
+  registers the port buttons automatically once the data becomes available.
 
 ### Security
-- Restored TLS certificate verification for all cloud and traditional OpenAPI connections. Fusion gateways continue to support their dedicated local web session for IP-address and self-signed-certificate compatibility.
-- Removed OAuth credentials, access tokens, refresh tokens, and Fusion passwords from reauthentication debug logs and downloaded diagnostics.
-- Removed `aiohttp` from the integration manifest because it is already provided and maintained by Home Assistant Core.
+
+- Refresh-token requests no longer place credentials in the URL query string.
+
+### Thanks
+
+- @oralallen82 for the detailed report and the overlapping fix that prompted
+  the TLS verification option (PR #55).
+
+---
+
+**Upgrade note:** after updating, existing local controller entries reconnect
+automatically. If a local setup still reports a certificate error, open the
+integration's configure/reconfigure dialog and clear **Verify TLS certificate**,
+or re-add the controller with the checkbox cleared.
