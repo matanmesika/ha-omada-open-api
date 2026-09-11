@@ -13,6 +13,7 @@ from homeassistant.config_entries import (
     ConfigFlowResult,
     OptionsFlow,
 )
+from homeassistant.const import CONF_VERIFY_SSL
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.selector import (
@@ -94,6 +95,13 @@ def _classify_connection_error(err: aiohttp.ClientError) -> str:
         os_message = repr(os_error).lower() if os_error else ""
 
     combined = f"{error_message} {os_message}"
+
+    # Prefer the typed aiohttp certificate error; fall back to matching the
+    # certificate wording for wrapped/plainly-constructed ClientError instances.
+    if isinstance(err, aiohttp.ClientConnectorCertificateError) or (
+        "certificate verify failed" in combined or "self-signed" in combined
+    ):
+        return "certificate_verify_failed"
 
     if (
         "name or service not known" in combined
@@ -188,6 +196,9 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
         self._selected_client_macs: list[str] = []
         self._available_applications: list[dict[str, Any]] = []
         self._ssid_filter: list[str] = []
+        # Default False matches entries created before verify_ssl existed,
+        # restoring pre-v1.10 connectivity for self-signed controllers.
+        self._verify_ssl: bool = False
         # Fusion-specific
         self._fusion_username: str | None = None
         self._fusion_password: str | None = None
@@ -236,6 +247,9 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
         """Handle cloud controller region selection."""
         errors: dict[str, str] = {}
 
+        # TP-Link cloud endpoints present valid certificates.
+        self._verify_ssl = True
+
         if user_input is not None:
             self._region = user_input[CONF_REGION]
             self._api_url = REGIONS[self._region]["api_url"]
@@ -264,6 +278,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             self._api_url = user_input[CONF_API_URL].rstrip("/")
+            self._verify_ssl = user_input[CONF_VERIFY_SSL]
             # Validate URL format
             if not self._api_url.startswith(("http://", "https://")):
                 errors[CONF_API_URL] = "invalid_url"
@@ -277,6 +292,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_API_URL,
                     description={"suggested_value": "https://"},
                 ): cv.string,
+                vol.Required(CONF_VERIFY_SSL, default=True): cv.boolean,
             }
         )
 
@@ -610,6 +626,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
             if self._token_expires_at
             else "",
             CONF_SELECTED_SITES: self._selected_site_ids,
+            CONF_VERIFY_SSL: self._verify_ssl,
         }
 
     def _generate_entry_title(self) -> str:
@@ -785,7 +802,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         """
         _LOGGER.debug("Getting access token from %s", api_url)
-        session = async_get_clientsession(self.hass)
+        session = async_get_clientsession(self.hass, verify_ssl=self._verify_ssl)
 
         # Use client credentials grant type as specified in Omada API docs
         url = f"{api_url}/openapi/authorize/token"
@@ -837,7 +854,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
             aiohttp.ClientError: If connection fails
 
         """
-        session = async_get_clientsession(self.hass)
+        session = async_get_clientsession(self.hass, verify_ssl=self._verify_ssl)
         url = f"{self._api_url}/openapi/v1/{self._omada_id}/sites"
         headers = {"Authorization": f"AccessToken={self._access_token}"}
         # Add pagination parameters as shown in the Omada API documentation
@@ -874,7 +891,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         if self._controller_type == CONTROLLER_TYPE_FUSION:
             return self._get_fusion_session()
-        return async_get_clientsession(self.hass)
+        return async_get_clientsession(self.hass, verify_ssl=self._verify_ssl)
 
     def _build_api_headers(self) -> dict[str, str]:
         """Build API headers based on current auth mode."""
@@ -1164,6 +1181,10 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
             self._omada_id = omada_id
             self._client_id = client_id
             self._client_secret = client_secret
+            self._verify_ssl = user_input.get(
+                CONF_VERIFY_SSL,
+                reconfigure_entry.data.get(CONF_VERIFY_SSL, False),
+            )
 
             try:
                 token_data = await self._get_access_token(
@@ -1240,6 +1261,10 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
                     default=entry.data.get(CONF_CLIENT_ID, ""),
                 ): cv.string,
                 vol.Required(CONF_CLIENT_SECRET): cv.string,
+                vol.Optional(
+                    CONF_VERIFY_SSL,
+                    default=entry.data.get(CONF_VERIFY_SSL, False),
+                ): cv.boolean,
             }
         )
 
@@ -1278,6 +1303,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
                             else ""
                         ),
                         CONF_SELECTED_SITES: selected,
+                        CONF_VERIFY_SSL: self._verify_ssl,
                     },
                 )
 
@@ -1346,6 +1372,9 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
         _LOGGER.debug("Reauth confirmation submitted: %s", user_input is not None)
         errors: dict[str, str] = {}
         reauth_entry = self._get_reauth_entry()
+        # Validation must match the entry's stored setting; reauth does not
+        # change it.
+        self._verify_ssl = reauth_entry.data.get(CONF_VERIFY_SSL, False)
         _LOGGER.debug("Reauth entry retrieved: %s", reauth_entry.title)
 
         if user_input is not None:
@@ -1518,7 +1547,10 @@ class OmadaOptionsFlowHandler(OptionsFlow):
             return self._live_session
         if self._fusion_csrf_token:
             return self._get_fusion_session()
-        return async_get_clientsession(self.hass)
+        return async_get_clientsession(
+            self.hass,
+            verify_ssl=self.config_entry.data.get(CONF_VERIFY_SSL, False),
+        )
 
     def _build_api_headers(self) -> dict[str, str]:
         """Build API headers based on current auth mode."""

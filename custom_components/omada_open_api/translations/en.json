@@ -25,10 +25,12 @@
                 "title": "Local Controller URL",
                 "description": "Enter the URL of your self-hosted Omada controller (e.g., {example_url}).",
                 "data": {
-                    "api_url": "Controller URL"
+                    "api_url": "Controller URL",
+                    "verify_ssl": "Verify TLS certificate"
                 },
                 "data_description": {
-                    "api_url": "Full URL including protocol and port"
+                    "api_url": "Full URL including protocol and port",
+                    "verify_ssl": "Leave enabled for valid HTTPS certificates. Disable to connect to a hardware controller (e.g. OC200/OC300) that uses the factory self-signed certificate."
                 }
             },
             "fusion": {
@@ -112,7 +114,8 @@
                     "api_url": "Controller URL",
                     "omada_id": "Omada ID",
                     "client_id": "Client ID",
-                    "client_secret": "Client Secret"
+                    "client_secret": "Client Secret",
+                    "verify_ssl": "Verify TLS certificate"
                 },
                 "data_description": {
                     "controller_type": "Cloud-hosted uses TP-Link cloud; local connects directly to your controller",
@@ -120,7 +123,8 @@
                     "api_url": "Full URL including protocol (only for local controllers)",
                     "omada_id": "MSP ID or Customer ID from your Open API application",
                     "client_id": "OAuth2 Client ID from your Open API application",
-                    "client_secret": "OAuth2 Client Secret from your Open API application"
+                    "client_secret": "OAuth2 Client Secret from your Open API application",
+                    "verify_ssl": "Leave enabled for valid HTTPS certificates. Disable to connect to a hardware controller (e.g. OC200/OC300) that uses the factory self-signed certificate."
                 }
             },
             "reconfigure_sites": {
@@ -134,6 +138,7 @@
         "error": {
             "cannot_connect": "Failed to connect to Omada API. Check network connectivity between Home Assistant and the controller. Enable debug logging for detailed diagnostics.",
             "cannot_resolve_host": "Cannot resolve hostname. Check that the URL is correct and DNS is working on your Home Assistant host.",
+            "certificate_verify_failed": "TLS certificate verification failed. If this controller uses a self-signed certificate (common on OC200/OC300 hardware controllers), disable \"Verify TLS certificate\" in the reconfigure settings, or install a certificate trusted by Home Assistant.",
             "connection_refused": "Connection refused. Verify the controller is running and the port is correct (default HTTPS port is usually 8043 for local controllers).",
             "controller_id_not_found_free_tier": "This Omada ID was not found via the cloud Open API. Omada Cloud/Central Essentials (the free tier) does not support Open API at all, so no Omada ID will ever resolve here — re-checking the ID will not help. Upgrade to Omada Cloud/Central Standard, or use a self-hosted Omada Software/Hardware Controller, including OC200 on supported firmware, with the Local controller type instead.",
             "invalid_auth": "Invalid authentication credentials. Verify your Omada ID matches the MSP/Customer ID shown in Settings > Platform Integration > Open API. Also check Client ID and Client Secret.",
