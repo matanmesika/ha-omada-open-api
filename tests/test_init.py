@@ -38,6 +38,7 @@ from custom_components.omada_open_api.const import (
     CONF_CLIENT_ID,
     CONF_CLIENT_SCAN_INTERVAL,
     CONF_CLIENT_SECRET,
+    CONF_CONTROLLER_TYPE,
     CONF_DEVICE_SCAN_INTERVAL,
     CONF_ENABLE_VPN_SENSORS,
     CONF_ENABLE_WAN_SPEED_TEST,
@@ -47,7 +48,11 @@ from custom_components.omada_open_api.const import (
     CONF_SELECTED_CLIENTS,
     CONF_SELECTED_SITES,
     CONF_TOKEN_EXPIRES_AT,
+    CONTROLLER_TYPE_CLOUD,
+    CONTROLLER_TYPE_FUSION,
+    CONTROLLER_TYPE_LOCAL,
     DOMAIN,
+    resolve_verify_ssl,
 )
 
 from .conftest import (
@@ -175,6 +180,34 @@ def _patch_api_client(**overrides):
 
 
 # ---------------------------------------------------------------------------
+# TLS verification policy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("stored", [True, False, None])
+def test_resolve_verify_ssl_cloud_always_verifies(stored: bool | None) -> None:
+    """Cloud controllers verify TLS regardless of the stored preference."""
+    assert resolve_verify_ssl(CONTROLLER_TYPE_CLOUD, stored) is True
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [(True, True), (False, False), (None, False)],
+)
+def test_resolve_verify_ssl_local_honors_stored(
+    stored: bool | None, expected: bool
+) -> None:
+    """Local controllers honor an explicit preference and default to off."""
+    assert resolve_verify_ssl(CONTROLLER_TYPE_LOCAL, stored) is expected
+
+
+def test_resolve_verify_ssl_missing_values_default_off() -> None:
+    """Legacy or non-cloud entries with no stored value do not verify."""
+    assert resolve_verify_ssl(None, None) is False
+    assert resolve_verify_ssl(CONTROLLER_TYPE_FUSION, None) is False
+
+
+# ---------------------------------------------------------------------------
 # Setup tests
 # ---------------------------------------------------------------------------
 
@@ -207,6 +240,32 @@ async def test_setup_entry_success(hass: HomeAssistant) -> None:
 async def test_setup_entry_success_with_verify_ssl(hass: HomeAssistant) -> None:
     """A stored verify_ssl=True is passed through to the shared session."""
     entry = _build_entry(hass, data_overrides={CONF_VERIFY_SSL: True})
+    patcher, _mock_client = _patch_api_client()
+    shared_session = MagicMock()
+
+    with (
+        patcher,
+        patch(
+            "custom_components.omada_open_api.async_get_clientsession",
+            return_value=shared_session,
+        ) as mock_get_clientsession,
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    mock_get_clientsession.assert_called_once_with(hass, verify_ssl=True)
+    assert entry.state is ConfigEntryState.LOADED
+
+
+async def test_setup_entry_legacy_cloud_forces_verify_ssl(
+    hass: HomeAssistant,
+) -> None:
+    """A legacy cloud entry lacking verify_ssl still verifies TLS."""
+    entry = _build_entry(
+        hass,
+        data_overrides={CONF_CONTROLLER_TYPE: CONTROLLER_TYPE_CLOUD},
+    )
+    assert CONF_VERIFY_SSL not in entry.data
     patcher, _mock_client = _patch_api_client()
     shared_session = MagicMock()
 

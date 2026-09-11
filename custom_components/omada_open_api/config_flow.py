@@ -70,6 +70,7 @@ from .const import (
     MAX_SCAN_INTERVAL,
     MIN_SCAN_INTERVAL,
     REGIONS,
+    resolve_verify_ssl,
 )
 
 if TYPE_CHECKING:
@@ -1181,9 +1182,12 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
             self._omada_id = omada_id
             self._client_id = client_id
             self._client_secret = client_secret
-            self._verify_ssl = user_input.get(
-                CONF_VERIFY_SSL,
-                reconfigure_entry.data.get(CONF_VERIFY_SSL, False),
+            self._verify_ssl = resolve_verify_ssl(
+                controller_type,
+                user_input.get(
+                    CONF_VERIFY_SSL,
+                    reconfigure_entry.data.get(CONF_VERIFY_SSL),
+                ),
             )
 
             try:
@@ -1261,12 +1265,19 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
                     default=entry.data.get(CONF_CLIENT_ID, ""),
                 ): cv.string,
                 vol.Required(CONF_CLIENT_SECRET): cv.string,
-                vol.Optional(
-                    CONF_VERIFY_SSL,
-                    default=entry.data.get(CONF_VERIFY_SSL, False),
-                ): cv.boolean,
             }
         )
+        # Cloud controllers always verify TLS, so the toggle would be
+        # misleading; only local controllers may opt out.
+        if not is_cloud:
+            data_schema = data_schema.extend(
+                {
+                    vol.Optional(
+                        CONF_VERIFY_SSL,
+                        default=entry.data.get(CONF_VERIFY_SSL, False),
+                    ): cv.boolean,
+                }
+            )
 
         return self.async_show_form(
             step_id="reconfigure",
@@ -1372,9 +1383,12 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
         _LOGGER.debug("Reauth confirmation submitted: %s", user_input is not None)
         errors: dict[str, str] = {}
         reauth_entry = self._get_reauth_entry()
-        # Validation must match the entry's stored setting; reauth does not
-        # change it.
-        self._verify_ssl = reauth_entry.data.get(CONF_VERIFY_SSL, False)
+        # Validation must match the entry's effective setting; reauth does
+        # not change it.
+        self._verify_ssl = resolve_verify_ssl(
+            reauth_entry.data.get(CONF_CONTROLLER_TYPE),
+            reauth_entry.data.get(CONF_VERIFY_SSL),
+        )
         _LOGGER.debug("Reauth entry retrieved: %s", reauth_entry.title)
 
         if user_input is not None:
@@ -1549,7 +1563,10 @@ class OmadaOptionsFlowHandler(OptionsFlow):
             return self._get_fusion_session()
         return async_get_clientsession(
             self.hass,
-            verify_ssl=self.config_entry.data.get(CONF_VERIFY_SSL, False),
+            verify_ssl=resolve_verify_ssl(
+                self.config_entry.data.get(CONF_CONTROLLER_TYPE),
+                self.config_entry.data.get(CONF_VERIFY_SSL),
+            ),
         )
 
     def _build_api_headers(self) -> dict[str, str]:

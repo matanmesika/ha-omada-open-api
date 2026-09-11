@@ -38,6 +38,29 @@ CONTROLLER_TYPE_CLOUD = "cloud"
 CONTROLLER_TYPE_LOCAL = "local"
 CONTROLLER_TYPE_FUSION = "fusion"
 
+
+def resolve_verify_ssl(controller_type: str | None, stored_value: bool | None) -> bool:
+    """Return the effective TLS verification setting for a controller.
+
+    Cloud controllers always verify. Local controllers honor an explicit
+    stored preference and otherwise default to disabled, preserving
+    connectivity for controllers that ship a self-signed certificate.
+
+    Args:
+        controller_type: The controller type stored on the config entry, or
+            None for legacy entries that predate the key.
+        stored_value: The explicitly stored verify_ssl preference, or None
+            when the entry predates the option.
+
+    Returns:
+        True when TLS certificates must be verified, False otherwise.
+
+    """
+    if controller_type == CONTROLLER_TYPE_CLOUD:
+        return True
+    return stored_value if stored_value is not None else False
+
+
 # Auth modes
 AUTH_MODE_OPENAPI = "openapi"
 AUTH_MODE_WEB_SESSION = "web_session"

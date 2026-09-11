@@ -34,6 +34,7 @@ from .const import (
     CONF_CLIENT_ID,
     CONF_CLIENT_SCAN_INTERVAL,
     CONF_CLIENT_SECRET,
+    CONF_CONTROLLER_TYPE,
     CONF_DEVICE_SCAN_INTERVAL,
     CONF_DISCONNECT_TIMEOUT,
     CONF_ENABLE_THREAT_HEATMAP_SENSORS,
@@ -57,6 +58,7 @@ from .const import (
     DOMAIN,
     MIN_SCAN_INTERVAL,
     THREAT_HEATMAP_INTERVALS,
+    resolve_verify_ssl,
 )
 from .coordinator import (
     OmadaAppTrafficCoordinator,
@@ -435,7 +437,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: OmadaConfigEntry) -> boo
         else:
             # Traditional OpenAPI: client_credentials authentication
             session = async_get_clientsession(
-                hass, verify_ssl=entry.data.get(CONF_VERIFY_SSL, False)
+                hass,
+                verify_ssl=resolve_verify_ssl(
+                    entry.data.get(CONF_CONTROLLER_TYPE),
+                    entry.data.get(CONF_VERIFY_SSL),
+                ),
             )
             token_expires_at = dt.datetime.fromisoformat(
                 entry.data[CONF_TOKEN_EXPIRES_AT]

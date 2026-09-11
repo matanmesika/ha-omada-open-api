@@ -1379,6 +1379,55 @@ async def test_reauth_validation_uses_stored_verify_ssl(
     assert entry.data[CONF_VERIFY_SSL] is True
 
 
+async def test_reauth_legacy_cloud_forces_verify_ssl(hass: HomeAssistant) -> None:
+    """Reauth of a legacy cloud entry validates with verification on."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_API_URL: "https://test.example.com",
+            CONF_OMADA_ID: "reauth_cloud",
+            CONF_CLIENT_ID: "old_cid",
+            CONF_CLIENT_SECRET: "old_csecret",
+            CONF_ACCESS_TOKEN: "expired_token",
+            CONF_REFRESH_TOKEN: "expired_rtoken",
+            CONF_TOKEN_EXPIRES_AT: _future_token_expiry(),
+            CONF_SELECTED_SITES: ["site1"],
+            CONF_CONTROLLER_TYPE: CONTROLLER_TYPE_CLOUD,
+        },
+        unique_id="reauth_cloud",
+    )
+    entry.add_to_hass(hass)
+    assert CONF_VERIFY_SSL not in entry.data
+    shared_session = _mock_openapi_shared_session()
+
+    with patch("custom_components.omada_open_api.async_setup_entry", return_value=True):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    result = await entry.start_reauth_flow(hass)
+    assert result["step_id"] == "reauth_confirm"
+
+    with (
+        patch(
+            "custom_components.omada_open_api.config_flow.async_get_clientsession",
+            return_value=shared_session,
+        ) as mock_get_clientsession,
+        patch("custom_components.omada_open_api.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_OMADA_ID: "reauth_cloud",
+                CONF_CLIENT_ID: "new_cid",
+                CONF_CLIENT_SECRET: "new_csecret",
+            },
+        )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    mock_get_clientsession.assert_called_with(hass, verify_ssl=True)
+
+
 async def test_reauth_flow_invalid_auth(hass: HomeAssistant) -> None:
     """Test reauthentication with invalid credentials shows error."""
     entry = MockConfigEntry(
@@ -3385,6 +3434,92 @@ async def test_reconfigure_persists_verify_ssl_toggle(
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
     assert entry.data[CONF_VERIFY_SSL] is True
+
+
+async def test_reconfigure_legacy_cloud_forces_verify_ssl(
+    hass: HomeAssistant, mock_setup_entry: AsyncMock
+) -> None:
+    """Reconfiguring a legacy cloud entry hides the toggle and persists on."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_API_URL: "https://old.example.com",
+            CONF_OMADA_ID: "old_omada_id",
+            CONF_CLIENT_ID: "old_client_id",
+            CONF_CLIENT_SECRET: "old_secret",
+            CONF_ACCESS_TOKEN: "old_token",
+            CONF_REFRESH_TOKEN: "old_refresh",
+            CONF_TOKEN_EXPIRES_AT: _future_token_expiry(),
+            CONF_SELECTED_SITES: ["site1"],
+            CONF_CONTROLLER_TYPE: CONTROLLER_TYPE_CLOUD,
+            CONF_REGION: "us",
+        },
+        entry_id="test_reconfig_cloud",
+    )
+    entry.add_to_hass(hass)
+    assert CONF_VERIFY_SSL not in entry.data
+
+    with (
+        patch(
+            "custom_components.omada_open_api.config_flow.OmadaConfigFlow._get_access_token",
+            return_value=MOCK_TOKEN_DATA,
+        ),
+        patch(
+            "custom_components.omada_open_api.config_flow.OmadaConfigFlow._get_sites",
+            return_value=MOCK_SITES,
+        ),
+    ):
+        result = await entry.start_reconfigure_flow(hass)
+        assert result["step_id"] == "reconfigure"
+        assert CONF_VERIFY_SSL not in result["data_schema"].schema
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_CONTROLLER_TYPE: CONTROLLER_TYPE_CLOUD,
+                CONF_REGION: "us",
+                CONF_OMADA_ID: "omada_id",
+                CONF_CLIENT_ID: "client_id",
+                CONF_CLIENT_SECRET: "secret",
+            },
+        )
+        assert result["step_id"] == "reconfigure_sites"
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={CONF_SELECTED_SITES: ["site123"]},
+        )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data[CONF_VERIFY_SSL] is True
+
+
+async def test_reconfigure_form_includes_verify_ssl_for_local(
+    hass: HomeAssistant, mock_setup_entry: AsyncMock
+) -> None:
+    """The reconfigure form still exposes the toggle for local controllers."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_API_URL: "https://old.example.com",
+            CONF_OMADA_ID: "old_omada_id",
+            CONF_CLIENT_ID: "old_client_id",
+            CONF_CLIENT_SECRET: "old_secret",
+            CONF_ACCESS_TOKEN: "old_token",
+            CONF_REFRESH_TOKEN: "old_refresh",
+            CONF_TOKEN_EXPIRES_AT: _future_token_expiry(),
+            CONF_SELECTED_SITES: ["site1"],
+            CONF_CONTROLLER_TYPE: CONTROLLER_TYPE_LOCAL,
+        },
+        entry_id="test_reconfig_local_schema",
+    )
+    entry.add_to_hass(hass)
+
+    result = await entry.start_reconfigure_flow(hass)
+
+    assert result["step_id"] == "reconfigure"
+    assert CONF_VERIFY_SSL in result["data_schema"].schema
 
 
 # ---------------------------------------------------------------------------
