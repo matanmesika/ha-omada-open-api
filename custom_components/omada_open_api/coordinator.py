@@ -12,7 +12,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .api import OmadaApiClient, OmadaApiError
-from .clients import process_client
+from .clients import normalize_client_mac, process_client
 from .const import (
     AP_ACTIVITY_HOLD_MIN_SECONDS,
     AP_ACTIVITY_HOLD_POLLS,
@@ -69,6 +69,9 @@ class OmadaSiteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.site_id = site_id
         self.site_name = site_name
         self._enable_vpn_status = enable_vpn_status
+        # Distinguish a successful empty client poll from a failed optional call.
+        self._clients_fetch_ok = True
+        self._unsupported_vpn_types: set[str] = set()
 
         # Firmware info cache — checked less frequently than device data.
         self._firmware_info: dict[str, dict[str, Any]] = {}
@@ -192,6 +195,13 @@ class OmadaSiteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Fetch all active clients and map them to devices
             all_clients = await self._fetch_site_clients()
             self._assign_clients_to_devices(devices, all_clients)
+            # Index once per coordinator update: avoids N*M scans when a
+            # large deployment has hundreds of presence-only tracker entities.
+            client_index = {
+                normalize_client_mac(client["mac"]): client
+                for client in all_clients
+                if isinstance(client.get("mac"), str)
+            }
 
             # Stamp has_wired_ports flag for switches (confirmed via API) and gateways.
             await self._stamp_wired_ports_flags(devices)
@@ -215,6 +225,8 @@ class OmadaSiteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     await self._fetch_vpn_status() if self._enable_vpn_status else {}
                 ),
                 "all_clients": all_clients,
+                "client_index": client_index,
+                "clients_poll_ok": self._clients_fetch_ok,
                 "site_id": self.site_id,
                 "site_name": self.site_name,
                 "ap_radio_config": await self._fetch_ap_radio_config(devices),
@@ -385,8 +397,17 @@ class OmadaSiteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             ),
                             "mac": client.get("mac", ""),
                             "ip": client.get("ip", ""),
+                            "host_name": client.get("hostName"),
+                            "ssid": client.get("ssid"),
+                            "channel": client.get("channel"),
+                            "vendor": client.get("vendor"),
+                            "device_type": client.get("deviceType"),
+                            "os_name": client.get("osName"),
                             "wireless": client.get("wireless", False),
                             "radio_id": client.get("radioId"),
+                            "rssi": client.get("rssi"),
+                            "snr": client.get("snr"),
+                            "signal_level": client.get("signalLevel"),
                             "guest": client.get("guest", False),
                             "ap_mac": client.get("apMac"),
                             "switch_mac": client.get("switchMac"),
@@ -397,12 +418,16 @@ class OmadaSiteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if len(all_clients) >= total or len(clients_page) < 1000:
                     break
                 page += 1
+            self._clients_fetch_ok = True
             _LOGGER.debug(
                 "Fetched %d active clients for site %s",
                 len(all_clients),
                 self.site_name,
             )
         except OmadaApiError as err:
+            # Preserve unknown/unavailable instead of incorrectly reporting
+            # every active client as away when only this endpoint fails.
+            self._clients_fetch_ok = False
             _LOGGER.warning(
                 "Failed to fetch clients for site %s: %s",
                 self.site_name,
@@ -909,28 +934,33 @@ class OmadaSiteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         """
         vpn_status: dict[str, list[dict[str, Any]]] = {}
+        fetchers = {
+            "s2s": self.api_client.get_vpn_s2s_stats,
+            "server": self.api_client.get_vpn_server_stats,
+            "client": self.api_client.get_vpn_client_stats,
+        }
 
-        try:
-            vpn_status["s2s"] = await self.api_client.get_vpn_s2s_stats(self.site_id)
-        except OmadaApiError as err:
-            _LOGGER.warning("Failed to fetch S2S VPN stats: %s", err)
-            vpn_status["s2s"] = []
-
-        try:
-            vpn_status["server"] = await self.api_client.get_vpn_server_stats(
-                self.site_id
-            )
-        except OmadaApiError as err:
-            _LOGGER.warning("Failed to fetch VPN server stats: %s", err)
-            vpn_status["server"] = []
-
-        try:
-            vpn_status["client"] = await self.api_client.get_vpn_client_stats(
-                self.site_id
-            )
-        except OmadaApiError as err:
-            _LOGGER.warning("Failed to fetch VPN client stats: %s", err)
-            vpn_status["client"] = []
+        for vpn_type, fetch in fetchers.items():
+            try:
+                vpn_status[vpn_type] = await fetch(self.site_id)
+            except OmadaApiError as err:
+                vpn_status[vpn_type] = []
+                # HTTP 400 means the controller rejected every request for
+                # this VPN type. The API client retries it hourly; warn only
+                # once until it recovers. See GH #63.
+                if err.http_status != 400:
+                    _LOGGER.warning("Failed to fetch %s VPN stats: %s", vpn_type, err)
+                elif vpn_type not in self._unsupported_vpn_types:
+                    self._unsupported_vpn_types.add(vpn_type)
+                    _LOGGER.warning(
+                        "%s VPN stats are not supported by this controller; "
+                        "retrying hourly",
+                        vpn_type,
+                    )
+            else:
+                if vpn_type in self._unsupported_vpn_types:
+                    self._unsupported_vpn_types.discard(vpn_type)
+                    _LOGGER.info("%s VPN stats are available again", vpn_type)
 
         await self._fetch_vpn_peers(vpn_status)
 

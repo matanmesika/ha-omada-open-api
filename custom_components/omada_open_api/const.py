@@ -15,6 +15,17 @@ CONF_TOKEN_EXPIRES = "token_expires"
 CONF_TOKEN_EXPIRES_AT = "token_expires_at"
 CONF_SELECTED_SITES = "selected_sites"
 CONF_SELECTED_CLIENTS = "selected_clients"
+# Separate presence-only discovery; heavyweight sensors remain selected-client opt-in.
+CONF_AUTO_DISCOVER_CLIENT_TRACKERS = "auto_discover_client_trackers"
+CONF_AUTO_DISCOVERY_EXCLUDED_CLIENTS = "auto_discovery_excluded_clients"
+CONF_AUTO_DISCOVERY_EXCLUDE_GUESTS = "auto_discovery_exclude_guests"
+CONF_AUTO_DISCOVERY_EXCLUDE_LOCAL_MACS = "auto_discovery_exclude_local_macs"
+CONF_AUTO_DISCOVERY_INCLUDE_WIRED = "auto_discovery_include_wired"
+CONF_AUTO_DISCOVERY_REQUIRE_NAME = "auto_discovery_require_name"
+CONF_AUTO_DISCOVERY_RETENTION_DAYS = "auto_discovery_retention_days"
+CONF_AUTO_DISCOVERY_SSIDS = "auto_discovery_ssids"
+CONF_AUTO_DISCOVERY_SIGNAL_ATTRIBUTES = "auto_discovery_signal_attributes"
+DEFAULT_AUTO_DISCOVERY_RETENTION_DAYS = 30
 CONF_SELECTED_APPLICATIONS = "selected_applications"
 CONF_SSID_FILTER = "ssid_filter"
 CONF_DISCONNECT_TIMEOUT = "disconnect_timeout"
@@ -70,6 +81,16 @@ CONF_PASSWORD = "password"
 
 # API constants
 DEFAULT_TIMEOUT = 30
+
+# Controllers that require filters.vpnType on the VPN stats endpoints accept
+# only these values per endpoint (measured on 6.3.0.45 and Fusion; see GH #67).
+VPN_STATS_TYPES: dict[str, tuple[int, ...]] = {
+    "s2s": (2, 4),
+    "server": (0, 1, 2, 3, 4, 5),
+    "client": (0, 1, 3, 4),
+}
+# A VPN stats request the controller rejected is retried after this delay.
+VPN_REJECTED_RETRY_SECONDS = 3600
 TOKEN_EXPIRY_BUFFER = 300  # Refresh token 5 minutes before expiry
 ACCESS_TOKEN_LIFETIME = 7200  # 2 hours in seconds
 REFRESH_TOKEN_LIFETIME = 1209600  # 14 days in seconds

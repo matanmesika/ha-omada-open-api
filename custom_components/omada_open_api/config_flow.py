@@ -14,6 +14,7 @@ from homeassistant.config_entries import (
     OptionsFlow,
 )
 from homeassistant.const import CONF_VERIFY_SSL
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.selector import (
@@ -24,6 +25,7 @@ from homeassistant.helpers.selector import (
 )
 import voluptuous as vol
 
+from .clients import normalize_client_mac
 from .const import (
     AUTH_MODE_OPENAPI,
     AUTH_MODE_WEB_SESSION,
@@ -31,6 +33,15 @@ from .const import (
     CONF_API_URL,
     CONF_APP_SCAN_INTERVAL,
     CONF_AUTH_MODE,
+    CONF_AUTO_DISCOVER_CLIENT_TRACKERS,
+    CONF_AUTO_DISCOVERY_EXCLUDE_GUESTS,
+    CONF_AUTO_DISCOVERY_EXCLUDE_LOCAL_MACS,
+    CONF_AUTO_DISCOVERY_EXCLUDED_CLIENTS,
+    CONF_AUTO_DISCOVERY_INCLUDE_WIRED,
+    CONF_AUTO_DISCOVERY_REQUIRE_NAME,
+    CONF_AUTO_DISCOVERY_RETENTION_DAYS,
+    CONF_AUTO_DISCOVERY_SIGNAL_ATTRIBUTES,
+    CONF_AUTO_DISCOVERY_SSIDS,
     CONF_CLIENT_ID,
     CONF_CLIENT_SCAN_INTERVAL,
     CONF_CLIENT_SECRET,
@@ -62,6 +73,7 @@ from .const import (
     CONTROLLER_TYPE_FUSION,
     CONTROLLER_TYPE_LOCAL,
     DEFAULT_APP_SCAN_INTERVAL,
+    DEFAULT_AUTO_DISCOVERY_RETENTION_DAYS,
     DEFAULT_CLIENT_SCAN_INTERVAL,
     DEFAULT_DEVICE_SCAN_INTERVAL,
     DEFAULT_DISCONNECT_TIMEOUT,
@@ -158,13 +170,89 @@ def filter_clients_by_ssids(
         ssid_filter: List of SSID names to include. Empty = no filtering.
 
     Returns:
-        Filtered list of clients.
+        Filtered list of clients, online clients first.
 
     """
-    if not ssid_filter:
-        return clients
-    filter_set = set(ssid_filter)
-    return [c for c in clients if not c.get("wireless") or c.get("ssid") in filter_set]
+    if ssid_filter:
+        filter_set = set(ssid_filter)
+        clients = [
+            c for c in clients if not c.get("wireless") or c.get("ssid") in filter_set
+        ]
+    return sorted(clients, key=lambda c: not c.get("active"))
+
+
+async def _fetch_all_clients(
+    session: aiohttp.ClientSession,
+    url: str,
+    headers: dict[str, str],
+    site_id: str,
+) -> list[dict[str, Any]]:
+    """Fetch every known client of a site, following all result pages.
+
+    Args:
+        session: HTTP session to use for the requests
+        url: Clients endpoint URL of the site
+        headers: Authenticated API headers
+        site_id: Site ID, used for logging
+
+    Returns:
+        List of client dictionaries
+
+    Raises:
+        aiohttp.ClientError: If connection fails
+
+    """
+    # scope=0 is intentional here: the config / options flow must
+    # show all known clients (including offline) so the user can
+    # choose which ones to track.  Polling coordinators use scope=1
+    # (online only) to avoid controller-side wifiMode warnings.
+    page = 1
+    page_size = 200
+    all_clients: list[dict[str, Any]] = []
+
+    _LOGGER.debug("Fetching clients from site %s", site_id)
+
+    while True:
+        body = {
+            "page": page,
+            "pageSize": page_size,
+            "scope": 0,  # 0: all clients (online + offline)
+            "filters": {},
+        }
+
+        async with session.post(
+            url,
+            headers=headers,
+            json=body,
+            timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT),
+        ) as response:
+            _LOGGER.debug("Clients endpoint response status: %s", response.status)
+            if response.status != 200:
+                response_text = await response.text()
+                _LOGGER.error(
+                    "Clients API error %s: %s", response.status, response_text
+                )
+                if response.status == 404:
+                    _LOGGER.warning(
+                        "Clients endpoint not supported for site %s; "
+                        "skipping client selection",
+                        site_id,
+                    )
+                    return []
+                response.raise_for_status()
+
+            result = await response.json(content_type=None)
+
+            if result.get("errorCode") != 0:
+                error_msg = result.get("msg", "Unknown error")
+                raise InvalidAuthError(f"API error: {error_msg}")
+
+            page_data: list[dict[str, Any]] = result["result"]["data"]
+            all_clients.extend(page_data)
+            total_rows = result["result"].get("totalRows", 0)
+            if len(all_clients) >= total_rows or len(page_data) < page_size:
+                return all_clients
+            page += 1
 
 
 class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -238,7 +326,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             errors=errors,
         )
 
@@ -267,7 +355,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="cloud",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             errors=errors,
         )
 
@@ -299,7 +387,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="local",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             errors=errors,
             description_placeholders={
                 "example_url": "https://192.168.1.100:8043",
@@ -385,7 +473,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="fusion",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             errors=errors,
             description_placeholders={
                 "example_url": "https://192.168.1.1",
@@ -405,6 +493,12 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
                 connector=connector, cookie_jar=jar
             )
         return self._fusion_session
+
+    @callback
+    def async_remove(self) -> None:
+        """Close the flow's own Fusion session when the flow ends."""
+        if self._fusion_session is not None:
+            self.hass.async_create_task(self._fusion_session.close())
 
     async def _get_omada_cid(self, api_url: str) -> str:
         """Auto-detect Omada controller ID from /api/info endpoint."""
@@ -555,7 +649,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="credentials",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             errors=errors,
             description_placeholders=description_placeholders,
         )
@@ -595,7 +689,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="sites",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             errors=errors,
             description_placeholders={
                 "site_count": str(len(self._available_sites)),
@@ -693,7 +787,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="ssid_filter",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             description_placeholders={
                 "ssid_count": str(len(available_ssids)),
                 "client_count": str(len(all_clients)),
@@ -745,7 +839,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         # Create client selection options
         client_options = []
-        for client in display_clients[:200]:  # Limit to 200 to avoid UI issues
+        for client in display_clients:
             name = client.get("name") or client.get("hostName") or "Unknown"
             mac = client.get("mac", "")
             ip = client.get("ip", "N/A")
@@ -772,7 +866,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="clients",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             errors=errors,
             description_placeholders={
                 "client_count": str(len(display_clients)),
@@ -908,63 +1002,13 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
         }
 
     async def _get_clients(self, site_id: str) -> list[dict[str, Any]]:
-        """Fetch all clients for a site.
-
-        Args:
-            site_id: Site ID to get clients for
-
-        Returns:
-            List of client dictionaries
-
-        Raises:
-            aiohttp.ClientError: If connection fails
-
-        """
-        session = self._get_http_session()
-        url = f"{self._api_url}/openapi/v2/{self._omada_id}/sites/{site_id}/clients"
-        headers = self._build_api_headers()
-
-        # scope=0 is intentional here: the config / options flow must
-        # show all known clients (including offline) so the user can
-        # choose which ones to track.  Polling coordinators use scope=1
-        # (online only) to avoid controller-side wifiMode warnings.
-        body = {
-            "page": 1,
-            "pageSize": 200,  # Get first 200 clients
-            "scope": 0,  # 0: all clients (online + offline)
-            "filters": {},
-        }
-
-        _LOGGER.debug("Fetching clients from site %s", site_id)
-
-        async with session.post(
-            url,
-            headers=headers,
-            json=body,
-            timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT),
-        ) as response:
-            _LOGGER.debug("Clients endpoint response status: %s", response.status)
-            if response.status != 200:
-                response_text = await response.text()
-                _LOGGER.error(
-                    "Clients API error %s: %s", response.status, response_text
-                )
-                if response.status == 404:
-                    _LOGGER.warning(
-                        "Clients endpoint not supported for site %s; "
-                        "skipping client selection",
-                        site_id,
-                    )
-                    return []
-                response.raise_for_status()
-
-            result = await response.json(content_type=None)
-
-            if result.get("errorCode") != 0:
-                error_msg = result.get("msg", "Unknown error")
-                raise InvalidAuthError(f"API error: {error_msg}")
-
-            return result["result"]["data"]  # type: ignore[no-any-return]
+        """Fetch all clients for a site."""
+        return await _fetch_all_clients(
+            self._get_http_session(),
+            f"{self._api_url}/openapi/v2/{self._omada_id}/sites/{site_id}/clients",
+            self._build_api_headers(),
+            site_id,
+        )
 
     async def _get_applications(self, site_id: str) -> list[dict[str, Any]]:
         """Fetch all available applications for DPI tracking.
@@ -1124,7 +1168,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="applications",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             errors=errors,
             description_placeholders={
                 "app_count": str(len(self._available_applications)),
@@ -1281,7 +1325,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="reconfigure",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             errors=errors,
         )
 
@@ -1346,7 +1390,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="reconfigure_sites",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             errors=errors,
             description_placeholders={
                 "site_count": str(len(sites)),
@@ -1452,7 +1496,7 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             errors=errors,
         )
 
@@ -1504,6 +1548,12 @@ class OmadaOptionsFlowHandler(OptionsFlow):
                 connector=connector, cookie_jar=jar
             )
         return self._fusion_session
+
+    @callback
+    def async_remove(self) -> None:
+        """Close the flow's own Fusion session when the flow ends."""
+        if self._fusion_session is not None:
+            self.hass.async_create_task(self._fusion_session.close())
 
     async def _fusion_login(self) -> str:
         """Log in to a Fusion gateway using stored credentials, return CSRF token.
@@ -1638,37 +1688,123 @@ class OmadaOptionsFlowHandler(OptionsFlow):
 
         return self.async_show_form(
             step_id="gateway_entity_settings",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
         )
 
     async def async_step_tracker_settings(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle device tracker settings (disconnect timeout)."""
+        """Handle device tracker and automatic client discovery settings."""
+        opts = self.config_entry.options
         if user_input is not None:
             return self.async_create_entry(
                 title="",
                 data={
-                    **self.config_entry.options,
+                    **opts,
                     CONF_DISCONNECT_TIMEOUT: user_input[CONF_DISCONNECT_TIMEOUT],
+                    CONF_AUTO_DISCOVER_CLIENT_TRACKERS: user_input.get(
+                        CONF_AUTO_DISCOVER_CLIENT_TRACKERS, False
+                    ),
+                    CONF_AUTO_DISCOVERY_RETENTION_DAYS: user_input.get(
+                        CONF_AUTO_DISCOVERY_RETENTION_DAYS,
+                        DEFAULT_AUTO_DISCOVERY_RETENTION_DAYS,
+                    ),
+                    CONF_AUTO_DISCOVERY_SSIDS: list(
+                        user_input.get(CONF_AUTO_DISCOVERY_SSIDS, [])
+                    ),
+                    CONF_AUTO_DISCOVERY_INCLUDE_WIRED: user_input.get(
+                        CONF_AUTO_DISCOVERY_INCLUDE_WIRED, True
+                    ),
+                    CONF_AUTO_DISCOVERY_EXCLUDE_GUESTS: user_input.get(
+                        CONF_AUTO_DISCOVERY_EXCLUDE_GUESTS, True
+                    ),
+                    CONF_AUTO_DISCOVERY_EXCLUDE_LOCAL_MACS: user_input.get(
+                        CONF_AUTO_DISCOVERY_EXCLUDE_LOCAL_MACS, False
+                    ),
+                    CONF_AUTO_DISCOVERY_REQUIRE_NAME: user_input.get(
+                        CONF_AUTO_DISCOVERY_REQUIRE_NAME, False
+                    ),
+                    CONF_AUTO_DISCOVERY_EXCLUDED_CLIENTS: list(
+                        user_input.get(CONF_AUTO_DISCOVERY_EXCLUDED_CLIENTS, [])
+                    ),
+                    CONF_AUTO_DISCOVERY_SIGNAL_ATTRIBUTES: user_input.get(
+                        CONF_AUTO_DISCOVERY_SIGNAL_ATTRIBUTES, True
+                    ),
                 },
             )
 
-        current_timeout = self.config_entry.options.get(
-            CONF_DISCONNECT_TIMEOUT, DEFAULT_DISCONNECT_TIMEOUT
-        )
+        current_timeout = opts.get(CONF_DISCONNECT_TIMEOUT, DEFAULT_DISCONNECT_TIMEOUT)
+        saved_ssids = opts.get(CONF_AUTO_DISCOVERY_SSIDS, [])
+        if isinstance(saved_ssids, str):
+            saved_ssids = [
+                ssid.strip() for ssid in saved_ssids.split(",") if ssid.strip()
+            ]
+        saved_exclusions = opts.get(CONF_AUTO_DISCOVERY_EXCLUDED_CLIENTS, [])
 
         data_schema = vol.Schema(
             {
                 vol.Required(CONF_DISCONNECT_TIMEOUT, default=current_timeout): vol.All(
                     vol.Coerce(int), vol.Range(min=0, max=60)
                 ),
+                vol.Required(
+                    CONF_AUTO_DISCOVER_CLIENT_TRACKERS,
+                    default=opts.get(CONF_AUTO_DISCOVER_CLIENT_TRACKERS, False),
+                ): bool,
+                vol.Required(
+                    CONF_AUTO_DISCOVERY_RETENTION_DAYS,
+                    default=opts.get(
+                        CONF_AUTO_DISCOVERY_RETENTION_DAYS,
+                        DEFAULT_AUTO_DISCOVERY_RETENTION_DAYS,
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(min=0, max=3650)),
+                vol.Optional(
+                    CONF_AUTO_DISCOVERY_SSIDS,
+                    default=saved_ssids,
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=sorted(set(saved_ssids)),
+                        multiple=True,
+                        custom_value=True,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_AUTO_DISCOVERY_INCLUDE_WIRED,
+                    default=opts.get(CONF_AUTO_DISCOVERY_INCLUDE_WIRED, True),
+                ): bool,
+                vol.Required(
+                    CONF_AUTO_DISCOVERY_EXCLUDE_GUESTS,
+                    default=opts.get(CONF_AUTO_DISCOVERY_EXCLUDE_GUESTS, True),
+                ): bool,
+                vol.Required(
+                    CONF_AUTO_DISCOVERY_EXCLUDE_LOCAL_MACS,
+                    default=opts.get(CONF_AUTO_DISCOVERY_EXCLUDE_LOCAL_MACS, False),
+                ): bool,
+                vol.Required(
+                    CONF_AUTO_DISCOVERY_REQUIRE_NAME,
+                    default=opts.get(CONF_AUTO_DISCOVERY_REQUIRE_NAME, False),
+                ): bool,
+                vol.Optional(
+                    CONF_AUTO_DISCOVERY_EXCLUDED_CLIENTS,
+                    default=saved_exclusions,
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=sorted(set(saved_exclusions)),
+                        multiple=True,
+                        custom_value=True,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_AUTO_DISCOVERY_SIGNAL_ATTRIBUTES,
+                    default=opts.get(CONF_AUTO_DISCOVERY_SIGNAL_ATTRIBUTES, True),
+                ): bool,
             }
         )
 
         return self.async_show_form(
             step_id="tracker_settings",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
         )
 
     async def async_step_device_entity_settings(
@@ -1722,7 +1858,7 @@ class OmadaOptionsFlowHandler(OptionsFlow):
 
         return self.async_show_form(
             step_id="device_entity_settings",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
         )
 
     async def async_step_client_entity_settings(
@@ -1774,7 +1910,7 @@ class OmadaOptionsFlowHandler(OptionsFlow):
 
         return self.async_show_form(
             step_id="client_entity_settings",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
         )
 
     async def async_step_site_entity_settings(
@@ -1805,7 +1941,7 @@ class OmadaOptionsFlowHandler(OptionsFlow):
 
         return self.async_show_form(
             step_id="site_entity_settings",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
         )
 
     async def async_step_update_intervals(
@@ -1858,8 +1994,28 @@ class OmadaOptionsFlowHandler(OptionsFlow):
 
         return self.async_show_form(
             step_id="update_intervals",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
         )
+
+    def _adopt_client_mac_spelling(self) -> None:
+        """Respell selected MACs the way the client list spells them.
+
+        Stored MACs may use another separator style than the client list, which
+        would hide them from the form's selection.
+        """
+        by_canonical = {
+            normalize_client_mac(c.get("mac", "")): c.get("mac", "")
+            for c in self._available_clients
+        }
+        self._working_client_macs = [
+            by_canonical.get(normalize_client_mac(mac), mac)
+            for mac in self._working_client_macs or []
+        ]
+
+    def _unknown_selected_macs(self) -> set[str]:
+        """Return selected client MACs that the controller does not list."""
+        known = {c.get("mac", "") for c in self._available_clients}
+        return set(self._working_client_macs or []) - known
 
     async def async_step_client_selection(
         self, user_input: dict[str, Any] | None = None
@@ -1882,8 +2038,8 @@ class OmadaOptionsFlowHandler(OptionsFlow):
                 c.get("mac", "")
                 for c in filter_clients_by_ssids(
                     self._available_clients, self._ssid_filter
-                )[:200]
-            }
+                )
+            } | self._unknown_selected_macs()
             submitted_macs = user_input.get(CONF_SELECTED_CLIENTS, [])
             self._working_client_macs = [
                 mac
@@ -1923,6 +2079,7 @@ class OmadaOptionsFlowHandler(OptionsFlow):
                     all_clients.extend(clients_data)
 
                 self._available_clients = all_clients
+                self._adopt_client_mac_spelling()
             except Exception:
                 _LOGGER.exception("Failed to fetch clients")
                 errors["base"] = "cannot_connect"
@@ -1945,7 +2102,7 @@ class OmadaOptionsFlowHandler(OptionsFlow):
         # Create client selection options
         client_options = []
         visible_macs: set[str] = set()
-        for client in display_clients[:200]:  # Limit to 200
+        for client in display_clients:
             name = client.get("name") or client.get("hostName") or "Unknown"
             mac = client.get("mac", "")
             ip = client.get("ip", "N/A")
@@ -1958,6 +2115,11 @@ class OmadaOptionsFlowHandler(OptionsFlow):
                     label=f"{online} {name} - {ip} ({mac})",
                 )
             )
+        # Keep offering selected clients the controller no longer lists, so a
+        # save never drops them and the user can still deselect them (GH #96).
+        for mac in sorted(self._unknown_selected_macs()):
+            visible_macs.add(mac)
+            client_options.append(SelectOptionDict(value=mac, label=f"⚪ {mac}"))
 
         # The field's default must only contain currently-valid options —
         # the full working selection (including SSIDs hidden by the current
@@ -1996,7 +2158,7 @@ class OmadaOptionsFlowHandler(OptionsFlow):
 
         return self.async_show_form(
             step_id="client_selection",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             errors=errors,
             description_placeholders={
                 "client_count": str(len(display_clients)),
@@ -2084,7 +2246,7 @@ class OmadaOptionsFlowHandler(OptionsFlow):
 
         return self.async_show_form(
             step_id="application_selection",
-            data_schema=data_schema,
+            data_schema=data_schema,  # type: ignore[arg-type]
             errors=errors,
             description_placeholders={
                 "app_count": str(len(self._available_applications)),
@@ -2093,63 +2255,13 @@ class OmadaOptionsFlowHandler(OptionsFlow):
         )
 
     async def _get_clients(self, site_id: str) -> list[dict[str, Any]]:
-        """Fetch all clients for a site.
-
-        Args:
-            site_id: Site ID to get clients for
-
-        Returns:
-            List of client dictionaries
-
-        Raises:
-            aiohttp.ClientError: If connection fails
-
-        """
-        session = self._get_http_session()
-        url = f"{self._api_url}/openapi/v2/{self._omada_id}/sites/{site_id}/clients"
-        headers = self._build_api_headers()
-
-        # scope=0 is intentional here: the config / options flow must
-        # show all known clients (including offline) so the user can
-        # choose which ones to track.  Polling coordinators use scope=1
-        # (online only) to avoid controller-side wifiMode warnings.
-        body = {
-            "page": 1,
-            "pageSize": 200,  # Get first 200 clients
-            "scope": 0,  # 0: all clients (online + offline)
-            "filters": {},
-        }
-
-        _LOGGER.debug("Fetching clients from site %s", site_id)
-
-        async with session.post(
-            url,
-            headers=headers,
-            json=body,
-            timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT),
-        ) as response:
-            _LOGGER.debug("Clients endpoint response status: %s", response.status)
-            if response.status != 200:
-                response_text = await response.text()
-                _LOGGER.error(
-                    "Clients API error %s: %s", response.status, response_text
-                )
-                if response.status == 404:
-                    _LOGGER.warning(
-                        "Clients endpoint not supported for site %s; "
-                        "skipping client selection",
-                        site_id,
-                    )
-                    return []
-                response.raise_for_status()
-
-            result = await response.json(content_type=None)
-
-            if result.get("errorCode") != 0:
-                error_msg = result.get("msg", "Unknown error")
-                raise InvalidAuthError(f"API error: {error_msg}")
-
-            return result["result"]["data"]  # type: ignore[no-any-return]
+        """Fetch all clients for a site."""
+        return await _fetch_all_clients(
+            self._get_http_session(),
+            f"{self._api_url}/openapi/v2/{self._omada_id}/sites/{site_id}/clients",
+            self._build_api_headers(),
+            site_id,
+        )
 
     async def _get_applications(self, site_id: str) -> list[dict[str, Any]]:
         """Fetch all available applications for DPI tracking.
