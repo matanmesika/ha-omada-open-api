@@ -16,7 +16,6 @@ def normalize_client_mac(mac: str) -> str:
     return mac.replace(":", "").replace("-", "").upper()
 
 
-
 def normalize_radio_band(client: dict[str, Any]) -> str | None:
     """Return a normalized 2.4/5/6 GHz band for a wireless client."""
     for key in ("band", "radioBand", "frequencyBand", "wirelessBand"):
@@ -36,13 +35,15 @@ def normalize_radio_band(client: dict[str, Any]) -> str | None:
     try:
         if radio_id is not None and int(radio_id) in radio_map:
             return radio_map[int(radio_id)]
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         pass
 
     channel = client.get("channel")
+    if channel is None:
+        return None
     try:
         channel_num = int(channel)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if 1 <= channel_num <= 14:
         return "2.4 GHz"
