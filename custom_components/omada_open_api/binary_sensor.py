@@ -22,7 +22,7 @@ from .coordinator import (
     OmadaSiteCoordinator,
     OmadaWanSpeedTestCoordinator,
 )
-from .devices import build_infra_device_info, resolve_via_device_id, get_device_sort_key
+from .devices import build_infra_device_info, get_device_sort_key, resolve_via_device_id
 from .entity import OmadaEntity
 
 PARALLEL_UPDATES = 0
