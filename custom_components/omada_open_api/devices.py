@@ -185,7 +185,7 @@ def build_client_device_info(
 ) -> DeviceInfo:
     """Build DeviceInfo for a network client device (MAC-only connections)."""
     client_name = client_data.get("name") or client_data.get("host_name") or client_mac
-    return DeviceInfo(
+    info = DeviceInfo(
         identifiers={(DOMAIN, client_mac)},
         connections={("mac", client_mac)},
         name=client_name,
@@ -193,8 +193,10 @@ def build_client_device_info(
         model=client_data.get("device_type") or client_data.get("model"),
         sw_version=client_data.get("os_name"),
         configuration_url=api_url,
-        via_device_id=via_device_id,
     )
+    if via_device_id is not None:
+        info["via_device_id"] = via_device_id
+    return info
 
 
 def process_device(device: dict[str, Any]) -> dict[str, Any]:
