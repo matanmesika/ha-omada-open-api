@@ -15,7 +15,11 @@ from homeassistant.helpers.entity import DeviceInfo  # type: ignore[attr-defined
 
 from .const import CONF_DISCONNECT_TIMEOUT, DEFAULT_DISCONNECT_TIMEOUT, DOMAIN
 from .coordinator import OmadaClientCoordinator, OmadaSiteCoordinator
-from .devices import build_client_device_info, format_detail_status, resolve_via_device_id
+from .devices import (
+    build_client_device_info,
+    format_detail_status,
+    resolve_via_device_id,
+)
 from .entity import OmadaEntity
 
 if TYPE_CHECKING:
@@ -66,9 +70,7 @@ async def async_setup_entry(
             new_macs = set(devices.keys()) - known_device_macs
             if new_macs:
                 known_device_macs.update(new_macs)
-                async_add_entities(
-                    [OmadaDeviceTracker(coord, mac) for mac in new_macs]
-                )
+                async_add_entities([OmadaDeviceTracker(coord, mac) for mac in new_macs])
 
             all_clients = coord.data.get("all_clients", []) if coord.data else []
             new_clients: list[OmadaDiscoveredClientTracker] = []
@@ -255,9 +257,7 @@ class OmadaDiscoveredClientTracker(
         self._last_seen: dt.datetime | None = dt.datetime.now(dt.UTC)
 
         client = self._client_data
-        client_name = (
-            client.get("name") or client.get("host_name") or client_mac
-        )
+        client_name = client.get("name") or client.get("host_name") or client_mac
         self._attr_name = client_name
         self._unique_id = f"{DOMAIN}_{client_mac}"
         self._attr_mac_address = client_mac.replace("-", ":").lower()
@@ -270,7 +270,8 @@ class OmadaDiscoveredClientTracker(
             return {}
         for client in self.coordinator.data.get("all_clients", []):
             if client.get("mac") == self._client_mac:
-                return client
+                found: dict[str, Any] = client
+                return found
         return {}
 
     def _update_device_info(self) -> None:
@@ -292,7 +293,7 @@ class OmadaDiscoveredClientTracker(
             else (DOMAIN, f"site_{self.coordinator.site_id}")
         )
         via_device_id = resolve_via_device_id(self.coordinator.hass, via_identifier)
-        self._attr_device_info = build_client_device_info(
+        self._attr_device_info = build_client_device_info(  # type: ignore[assignment]
             self._client_mac,
             client,
             self.coordinator.api_client.api_url,
@@ -357,9 +358,7 @@ class OmadaDiscoveredClientTracker(
             attrs["vendor"] = str(client["vendor"])
         if client.get("device_type"):
             attrs["device_type"] = str(client["device_type"])
-        attrs["connection_type"] = (
-            "wireless" if client.get("wireless") else "wired"
-        )
+        attrs["connection_type"] = "wireless" if client.get("wireless") else "wired"
         return attrs
 
     @callback
