@@ -247,11 +247,11 @@ def test_build_client_device_info_fields() -> None:
         "11-22-33-44-55-66",
         client_data,
         "https://omada.example",
-        (DOMAIN, "AA-BB-CC-DD-EE-FF"),
+        via_device_id="parent-device-id",
     )
     assert (DOMAIN, "11-22-33-44-55-66") in result["identifiers"]
     assert result["name"] == "Laptop"
     assert result["manufacturer"] == "Acme"
     assert result["model"] == "Laptop"
     assert result["sw_version"] == "macOS"
-    assert result["via_device"] == (DOMAIN, "AA-BB-CC-DD-EE-FF")
+    assert result["via_device_id"] == "parent-device-id"

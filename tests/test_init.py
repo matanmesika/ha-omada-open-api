@@ -134,6 +134,8 @@ def _certificate_error() -> OmadaApiError:
 def _patch_api_client(**overrides):
     """Return a context manager that patches OmadaApiClient construction."""
     mock_instance = MagicMock()
+    # Device registry entries need a real URL string for configuration_url.
+    mock_instance.api_url = "https://omada.example"
     mock_instance.get_sites = AsyncMock(return_value=_SITE_LIST)
     mock_instance.get_devices = AsyncMock(return_value=_DEVICES)
     mock_instance.get_device_uplink_info = AsyncMock(return_value=SAMPLE_UPLINK_INFO)
@@ -461,6 +463,46 @@ async def test_setup_entry_creates_wan_and_traffic_sensors(
 
     # Verify device stats coordinators were created.
     assert len(entry.runtime_data.device_stats_coordinators) > 0
+
+
+async def test_setup_entry_auto_discovers_client_without_selection(
+    hass: HomeAssistant,
+) -> None:
+    """Active clients get trackers even when selected_clients is empty."""
+    entry = _build_entry(
+        hass,
+        data_overrides={CONF_SELECTED_CLIENTS: []},
+    )
+    patcher, _mock_client = _patch_api_client()
+
+    with patcher:
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.runtime_data.client_coordinators == []
+
+    registry = er.async_get(hass)
+    client_unique_id = f"{DOMAIN}_11-22-33-44-55-AA"
+    entity_id = registry.async_get_entity_id("device_tracker", DOMAIN, client_unique_id)
+    assert entity_id is not None
+    # Home Assistant registers network scanner trackers disabled by default.
+    assert (
+        registry.async_get(entity_id).disabled_by
+        is er.RegistryEntryDisabler.INTEGRATION
+    )
+
+    # Once the user enables it, the tracker reports the discovered client.
+    registry.async_update_entity(entity_id, disabled_by=None)
+    with patcher:
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    state = hass.states.get(entity_id)
+    assert state is not None
+    assert state.attributes["friendly_name"] == "Phone"
+    assert state.attributes["host_name"] == "phone-host"
+    assert state.attributes["ip"] == "192.168.1.100"
 
 
 async def test_setup_entry_with_clients(hass: HomeAssistant) -> None:
