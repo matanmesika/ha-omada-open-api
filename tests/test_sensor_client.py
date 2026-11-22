@@ -6,6 +6,9 @@ import datetime as _dt
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+from homeassistant.helpers import device_registry as dr
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
@@ -44,6 +47,16 @@ def _processed_wireless() -> dict:
 def _processed_wired() -> dict:
     """Return processed wired client data."""
     return process_client(SAMPLE_CLIENT_WIRED)
+
+
+def _register_parent(hass: HomeAssistant, mac: str) -> str:
+    """Register a parent Omada device and return its device registry ID."""
+    entry = MockConfigEntry(domain=DOMAIN)
+    entry.add_to_hass(hass)
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id, identifiers={(DOMAIN, mac)}
+    )
+    return device.id
 
 
 def _create_client_sensor(
@@ -101,6 +114,7 @@ async def test_client_sensor_name(hass: HomeAssistant) -> None:
 
 async def test_client_sensor_device_info_wireless(hass: HomeAssistant) -> None:
     """Test device_info links to parent AP for wireless client."""
+    parent_id = _register_parent(hass, "AA-BB-CC-DD-EE-01")
     sensor = _create_client_sensor(
         hass,
         WIRELESS_MAC,
@@ -111,11 +125,12 @@ async def test_client_sensor_device_info_wireless(hass: HomeAssistant) -> None:
     assert (DOMAIN, WIRELESS_MAC) in device_info["identifiers"]
     assert device_info["name"] == "Phone"
     assert device_info["manufacturer"] == "Apple"
-    assert device_info["via_device"] == (DOMAIN, "AA-BB-CC-DD-EE-01")
+    assert device_info["via_device_id"] == parent_id
 
 
 async def test_client_sensor_device_info_wired(hass: HomeAssistant) -> None:
     """Test device_info links to parent switch for wired client."""
+    parent_id = _register_parent(hass, "AA-BB-CC-DD-EE-02")
     sensor = _create_client_sensor(
         hass,
         WIRED_MAC,
@@ -126,7 +141,7 @@ async def test_client_sensor_device_info_wired(hass: HomeAssistant) -> None:
     assert (DOMAIN, WIRED_MAC) in device_info["identifiers"]
     assert device_info["name"] == "Desktop"
     assert device_info["manufacturer"] == "Dell"
-    assert device_info["via_device"] == (DOMAIN, "AA-BB-CC-DD-EE-02")
+    assert device_info["via_device_id"] == parent_id
 
 
 async def test_client_sensor_device_info_excludes_ip_connection(
@@ -542,6 +557,7 @@ async def test_client_sensor_device_info_gateway_fallback(
     }
     mac = "AA-BB-CC-00-00-01"
     processed = process_client(gateway_client)
+    parent_id = _register_parent(hass, "GW-AA-BB-CC-DD-EE")
     sensor = _create_client_sensor(
         hass,
         mac,
@@ -550,8 +566,7 @@ async def test_client_sensor_device_info_gateway_fallback(
     )
     info = sensor.device_info
     assert info is not None
-    via = info.get("via_device")
-    assert via == (DOMAIN, "GW-AA-BB-CC-DD-EE")
+    assert info.get("via_device_id") == parent_id
 
 
 # ---------------------------------------------------------------------------
