@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock
 
 from custom_components.omada_open_api.api import OmadaApiClient, OmadaApiError
 from custom_components.omada_open_api.clients import normalize_radio_band
+from custom_components.omada_open_api.const import DOMAIN
 from custom_components.omada_open_api.coordinator import OmadaSiteCoordinator
 from custom_components.omada_open_api.devices import build_client_device_info
-from custom_components.omada_open_api.const import DOMAIN
 
 
 def test_normalize_radio_band_from_explicit_field_and_radio_id() -> None:
