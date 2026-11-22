@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -553,7 +553,6 @@ async def test_client_tracker_handle_coordinator_update(
     tracker.async_write_ha_state.assert_called_once()
 
 
-
 # ===========================================================================
 # Automatically discovered client trackers
 # ===========================================================================
@@ -641,7 +640,9 @@ async def test_discovered_client_keeps_mac_stable_when_name_changes(
     unique_id = tracker.unique_id
 
     coordinator.data["all_clients"][0]["name"] = "New Name"
-    tracker._handle_coordinator_update()
+    # The entity is not added to Home Assistant here, so skip the state write.
+    with patch.object(tracker, "async_write_ha_state"):
+        tracker._handle_coordinator_update()
 
     assert tracker.unique_id == unique_id
     assert tracker._attr_device_info["name"] == "New Name"
